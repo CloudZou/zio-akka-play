@@ -1,13 +1,15 @@
-import zio.App
+import zio.{App, Queue, UIO, ZIO}
 import zio.console._
-import zio.{Queue, UIO}
 import akka.actor._
 import com.typesafe.config.ConfigFactory
 import java.util.concurrent.Executors
-import scala.concurrent.{ExecutionContext}
+
+import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.FiniteDuration
 import java.util.concurrent.{Executors, TimeUnit}
 import java.util.concurrent.{ExecutorService, Executors, ThreadFactory}
+
+import zio.blocking.Blocking
 
 object ActorWithQueue extends App {
 
@@ -53,23 +55,7 @@ object ActorWithQueue extends App {
     }
   }
 
-  // Create a custom threadpool and execution context for Akka to use
-  val executor: ExecutorService = Executors.newFixedThreadPool(4, new ThreadFactory() {
-    override def newThread(r: Runnable): Thread = {
-      val t = Executors.defaultThreadFactory.newThread(r)
-      t.setDaemon(true)
-      t
-    }
-  })
-
-  implicit val akkaEc: ExecutionContext = ExecutionContext.fromExecutor(executor)
-
-  // Start the Actor system
   val config = ConfigFactory.load()
-  val as = ActorSystem("actorz", defaultExecutionContext = Some(akkaEc), config = Some(config))
-
-  // Start the publisher and a subscriber
-  val a1 = as.actorOf(Props(new Publisher), "publisher")
 
   def run(args: List[String]) = {
 
@@ -80,9 +66,13 @@ object ActorWithQueue extends App {
 
     val myAppLogic =
       for {
+        blockingEc <- ZIO.environment[Blocking].flatMap(_.blocking.blockingExecutor).map(_.asEC)
+        as = ActorSystem("actorz", defaultExecutionContext = Some(blockingEc), config = Some(config))
+        publishActor = as.actorOf(Props(new Publisher), "publisher")
         q <- Queue.bounded[String](5);
-        _ = as.actorOf(Props(new Subscriber(a1, q)), "sub-1");
-        _ <- processElement(q).forever.fork
+        _ = as.actorOf(Props(new Subscriber(publishActor, q)), "sub-1")
+        child <- processElement(q).forever.fork
+        _ <- child.join
       } yield ()
 
     myAppLogic.fold(_ => 1, _ => 0)
